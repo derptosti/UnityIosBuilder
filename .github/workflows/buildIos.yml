@@ -60,14 +60,16 @@ jobs:
       run: |
         mkdir -p Payload
         
-        # Kopieer de app rechtstreeks vanuit de geforceerde output-map
-        if [ -d "$GITHUB_WORKSPACE/build_output/Unity-iPhone.app" ]; then
-          cp -R "$GITHUB_WORKSPACE/build_output/Unity-iPhone.app" Payload/
+        # Zoekt dynamisch naar de map die eindigt op .app in de build-output map
+        REAL_APP_PATH=$(find $GITHUB_WORKSPACE/build_output -name "*.app" -type d | head -n 1)
+        echo "Echte app gevonden op pad: $REAL_APP_PATH"
+        
+        if [ -d "$REAL_APP_PATH" ]; then
+          cp -R "$REAL_APP_PATH" Payload/
           zip -r CompiledApp.ipa Payload
           echo "IPA succesvol ingepakt!"
         else
-          echo "Fout: Unity-iPhone.app is niet gevonden in de build_output map."
-          ls -la $GITHUB_WORKSPACE/build_output || true
+          echo "Fout: Er is geen .app map gevonden in de build_output map."
           exit 1
         fi
 
