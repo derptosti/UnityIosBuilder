@@ -1,12 +1,12 @@
-name: General iOS Cloud Builder
+name: General iOS Cloud Builder (Split ZIPs)
 
 on:
   workflow_dispatch:
     inputs:
-      zip_name:
-        description: 'Typ de exacte naam van het ZIP-bestand (bijv. treasure.zip of game2.zip)'
+      base_name:
+        description: 'Typ de naam van het ZIP-bestand zonder de .001 (bijv: TreasureHunt.zip)'
         required: true
-        default: 'ios-project.zip'
+        default: 'TreasureHunt.zip'
 
 jobs:
   build:
@@ -16,10 +16,14 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Unzip Selected Project
+    - name: Combine and Unzip Project Files
       run: |
-        echo "Bezig met uitpakken van: ${{ github.event.inputs.zip_name }}"
-        unzip "${{ github.event.inputs.zip_name }}"
+        echo "Bezig met samenvoegen van de delen voor: ${{ github.event.inputs.base_name }}"
+        # Plakt .zip.001, .zip.002 etc. weer aan elkaar tot één werkende zip
+        cat "${{ github.event.inputs.base_name }}.00"* > combined_project.zip
+        
+        # Pakt de samengevoegde zip uit
+        unzip combined_project.zip
         ls -la
 
     - name: Set up Xcode version
@@ -46,5 +50,5 @@ jobs:
     - name: Upload IPA Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ github.event.inputs.zip_name }}-IPA
+        name: ${{ github.event.inputs.base_name }}-IPA
         path: CompiledApp.ipa
