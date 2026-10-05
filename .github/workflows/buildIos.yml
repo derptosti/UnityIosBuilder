@@ -1,312 +1,68 @@
-name: Build Dino Battle iOS IPA
+name: General iOS Cloud Builder (Split ZIPs)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+    inputs:
+      base_name:
+        description: 'Typ de naam van het ZIP-bestand zonder de .001 (bijv: TreasureHunt.zip)'
+        required: true
+        default: 'TreasureHunt.zip'
 
 jobs:
-  # ============================================================
-  # JOB 1 - UNITY -> XCODE PROJECT
-  # ============================================================
-  build-unity:
-    name: Build Unity for iOS
-    runs-on: ubuntu-latest
-
+  build:
+    runs-on: macos-14
+    
     steps:
-      # --------------------------------------------------------
-      # Checkout repository
-      # --------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          lfs: true
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # --------------------------------------------------------
-      # Cache Unity Library
-      # --------------------------------------------------------
-      - name: Cache Unity Library
-        uses: actions/cache@v4
-        with:
-          path: Library
-          key: Library-iOS-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
-          restore-keys: |
-            Library-iOS-
+    - name: Combine and Unzip Project Files
+      run: |
+        echo "Bezig met samenvoegen van de delen voor: ${{ github.event.inputs.base_name }}"
+        # Plakt .zip.001, .zip.002 etc. weer aan elkaar tot één werkende zip
+        cat "${{ github.event.inputs.base_name }}.00"* > combined_project.zip
+        
+        # Pakt de samengevoegde zip uit
+        unzip combined_project.zip
+        echo "Bestanden succesvol uitgepakt. Inhoud map:"
+        ls -la
 
-      # --------------------------------------------------------
-      # Build Unity project for iOS
-      # --------------------------------------------------------
-      - name: Build Unity project
-        uses: game-ci/unity-builder@v4
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
-        with:
-          targetPlatform: iOS
-          buildName: DinoBattle
-          buildsPath: build
+    - name: Fix Script Permissions (Permission Denied Fix)
+      run: |
+        echo "Bezig met herstellen van rechten voor Unity shell-scripts..."
+        # Geeft execute-rechten aan het specifieke process_symbols script
+        if [ -f "process_symbols.sh" ]; then
+          chmod +x process_symbols.sh
+          echo "Rechten hersteld voor process_symbols.sh"
+        fi
+        
+        # Zoekt en hersteld eventuele andere verborgen .sh scripts in submappen
+        find . -name "*.sh" -exec chmod +x {} +
+        echo "Alle shell-script permissies zijn bijgewerkt!"
 
-      # --------------------------------------------------------
-      # Show generated files
-      # Useful if something goes wrong
-      # --------------------------------------------------------
-      - name: Show generated iOS project
-        run: |
-          echo "=========================================="
-          echo "Generated build files:"
-          echo "=========================================="
-          find build -maxdepth 3 -type d -print || true
+    - name: Set up Xcode version
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: '15.4'
 
-          echo ""
-          echo "=========================================="
-          echo "Xcode projects:"
-          echo "=========================================="
-          find build -name "*.xcodeproj" -print || true
+    - name: Build Xcode Project
+      run: |
+        xcodebuild -project Unity-iPhone.xcodeproj \
+                   -scheme Unity-iPhone \
+                   -configuration Release \
+                   -sdk iphoneos \
+                   CODE_SIGNING_ALLOWED=NO \
+                   CODE_SIGNING_REQUIRED=NO \
+                   clean build
 
-      # --------------------------------------------------------
-      # Upload generated Xcode project
-      # --------------------------------------------------------
-      - name: Upload Unity iOS project
-        uses: actions/upload-artifact@v4
-        with:
-          name: Unity-iOS-Xcode
-          path: build/iOS
-          if-no-files-found: error
-          retention-days: 7
+    - name: Package into IPA
+      run: |
+        mkdir -p Payload
+        mv build/Release-iphoneos/Unity-iPhone.app Payload/
+        zip -r CompiledApp.ipa Payload
 
-
-  # ============================================================
-  # JOB 2 - XCODE PROJECT -> IPA
-  # ============================================================
-  build-ipa:
-    name: Build iOS IPA
-    runs-on: macos-latest
-    needs: build-unity
-
-    steps:
-      # --------------------------------------------------------
-      # Checkout repository again
-      #
-      # IMPORTANT:
-      # process_symbols.sh exists in the repository.
-      # We need it available on the macOS runner.
-      # --------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      # --------------------------------------------------------
-      # Download generated Unity Xcode project
-      # --------------------------------------------------------
-      - name: Download Unity iOS project
-        uses: actions/download-artifact@v4
-        with:
-          name: Unity-iOS-Xcode
-          path: iOSBuild
-
-      # --------------------------------------------------------
-      # Fix process_symbols.sh permission
-      #
-      # THIS FIXES:
-      #
-      # process_symbols.sh: Permission denied
-      # exit code 65
-      # --------------------------------------------------------
-      - name: Fix Unity script permissions
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "Fixing process_symbols.sh permissions"
-          echo "=========================================="
-
-          if [ -f "$GITHUB_WORKSPACE/process_symbols.sh" ]; then
-            chmod +x "$GITHUB_WORKSPACE/process_symbols.sh"
-
-            echo "process_symbols.sh permissions:"
-            ls -la "$GITHUB_WORKSPACE/process_symbols.sh"
-          else
-            echo "ERROR: process_symbols.sh was not found!"
-            exit 1
-          fi
-
-          echo ""
-          echo "Fixing any other shell scripts inside iOSBuild..."
-
-          find "$GITHUB_WORKSPACE/iOSBuild" \
-            -type f \
-            -name "*.sh" \
-            -exec chmod +x {} \; || true
-
-      # --------------------------------------------------------
-      # Locate Unity Xcode project
-      #
-      # This prevents problems if Unity changes the exact
-      # directory structure.
-      # --------------------------------------------------------
-      - name: Locate Xcode project
-        id: xcode
-        shell: bash
-        run: |
-          echo "Searching for Unity-iPhone.xcodeproj..."
-
-          PROJECT=$(find "$GITHUB_WORKSPACE/iOSBuild" \
-            -name "Unity-iPhone.xcodeproj" \
-            -type d \
-            | head -n 1)
-
-          if [ -z "$PROJECT" ]; then
-            echo "ERROR: Unity-iPhone.xcodeproj could not be found."
-
-            echo ""
-            echo "Files inside iOSBuild:"
-            find "$GITHUB_WORKSPACE/iOSBuild" -maxdepth 4 -print
-
-            exit 1
-          fi
-
-          PROJECT_DIR=$(dirname "$PROJECT")
-
-          echo "Found project:"
-          echo "$PROJECT"
-
-          echo ""
-          echo "Project directory:"
-          echo "$PROJECT_DIR"
-
-          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-
-      # --------------------------------------------------------
-      # Show Xcode version
-      # --------------------------------------------------------
-      - name: Show Xcode version
-        run: |
-          xcodebuild -version
-          xcode-select -p
-
-      # --------------------------------------------------------
-      # Build unsigned iPhone app
-      #
-      # We intentionally disable signing because Sideloadly
-      # will sign the IPA when you install it.
-      # --------------------------------------------------------
-      - name: Build Unity iPhone app
-        shell: bash
-        run: |
-          set -o pipefail
-
-          echo "=========================================="
-          echo "Building Unity-iPhone"
-          echo "=========================================="
-
-          cd "${{ steps.xcode.outputs.project_dir }}"
-
-          xcodebuild \
-            -project "Unity-iPhone.xcodeproj" \
-            -scheme "Unity-iPhone" \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination "generic/platform=iOS" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            CONFIGURATION_BUILD_DIR="$GITHUB_WORKSPACE/XcodeOutput" \
-            clean build \
-            | tee "$GITHUB_WORKSPACE/xcodebuild.log"
-
-      # --------------------------------------------------------
-      # Find generated .app
-      # --------------------------------------------------------
-      - name: Find generated app
-        id: app
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "Searching for generated .app"
-          echo "=========================================="
-
-          APP=$(find "$GITHUB_WORKSPACE/XcodeOutput" \
-            -maxdepth 2 \
-            -type d \
-            -name "*.app" \
-            | head -n 1)
-
-          if [ -z "$APP" ]; then
-            echo "ERROR: No .app was generated."
-
-            echo ""
-            echo "XcodeOutput contents:"
-            find "$GITHUB_WORKSPACE/XcodeOutput" -maxdepth 4 -print || true
-
-            exit 1
-          fi
-
-          echo "Found app:"
-          echo "$APP"
-
-          echo "app=$APP" >> "$GITHUB_OUTPUT"
-
-      # --------------------------------------------------------
-      # Create IPA
-      #
-      # IPA format:
-      #
-      # DinoBattle.ipa
-      #   └── Payload
-      #       └── Unity-iPhone.app
-      # --------------------------------------------------------
-      - name: Create unsigned IPA
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "Creating IPA"
-          echo "=========================================="
-
-          rm -rf "$GITHUB_WORKSPACE/IPA"
-          rm -rf "$GITHUB_WORKSPACE/Payload"
-
-          mkdir -p "$GITHUB_WORKSPACE/Payload"
-          mkdir -p "$GITHUB_WORKSPACE/IPA"
-
-          cp -R \
-            "${{ steps.app.outputs.app }}" \
-            "$GITHUB_WORKSPACE/Payload/"
-
-          cd "$GITHUB_WORKSPACE"
-
-          /usr/bin/zip \
-            -qry \
-            "$GITHUB_WORKSPACE/IPA/DinoBattle-unsigned.ipa" \
-            Payload
-
-          echo ""
-          echo "Created:"
-          ls -lh "$GITHUB_WORKSPACE/IPA/DinoBattle-unsigned.ipa"
-
-      # --------------------------------------------------------
-      # Upload IPA
-      # --------------------------------------------------------
-      - name: Upload Dino Battle IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: DinoBattle-iOS-IPA
-          path: IPA/DinoBattle-unsigned.ipa
-          if-no-files-found: error
-          retention-days: 30
-
-      # --------------------------------------------------------
-      # Upload Xcode log only when the build fails
-      # --------------------------------------------------------
-      - name: Upload Xcode build log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Xcode-Build-Log
-          path: xcodebuild.log
-          if-no-files-found: ignore
-          retention-days: 7
+    - name: Upload IPA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ github.event.inputs.base_name }}-IPA
+        path: CompiledApp.ipa
