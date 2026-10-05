@@ -1,4 +1,4 @@
-    - name: Build Xcode Project
+    - name: Build Xcode Projects
       run: |
         xcodebuild -project Unity-iPhone.xcodeproj \
                    -scheme Unity-iPhone \
