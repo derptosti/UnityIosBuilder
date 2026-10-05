@@ -1,4 +1,51 @@
-    - name: Build Xcode Projects
+name: General iOS Cloud Builder (Split ZIPs)
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_name:
+        description: 'Typ de naam van het ZIP-bestand zonder de .001 (bijv: TreasureHunt.zip)'
+        required: true
+        default: 'TreasureHunt.zip'
+
+jobs:
+  build:
+    runs-on: macos-14
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Combine and Unzip Project Files
+      run: |
+        echo "Bezig met samenvoegen van de delen voor: ${{ github.event.inputs.base_name }}"
+        # Plakt .zip.001, .zip.002 etc. weer aan elkaar tot één werkende zip
+        cat "${{ github.event.inputs.base_name }}.00"* > combined_project.zip
+        
+        # Pakt de samengevoegde zip uit
+        unzip combined_project.zip
+        echo "Bestanden succesvol uitgepakt. Inhoud map:"
+        ls -la
+
+    - name: Fix Script Permissions (Permission Denied Fix)
+      run: |
+        echo "Bezig met herstellen van rechten voor Unity shell-scripts..."
+        # Geeft execute-rechten aan het specifieke process_symbols script
+        if [ -f "process_symbols.sh" ]; then
+          chmod +x process_symbols.sh
+          echo "Rechten hersteld voor process_symbols.sh"
+        fi
+        
+        # Zoekt en herstelt eventuele andere verborgen .sh scripts in submappen
+        find . -name "*.sh" -exec chmod +x {} +
+        echo "Alle shell-script permissies zijn bijgewerkt!"
+
+    - name: Set up Xcode version
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: '15.4'
+
+    - name: Build Xcode Project
       run: |
         xcodebuild -project Unity-iPhone.xcodeproj \
                    -scheme Unity-iPhone \
