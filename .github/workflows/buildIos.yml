@@ -36,7 +36,7 @@ jobs:
           echo "Rechten hersteld voor process_symbols.sh"
         fi
         
-        # Zoekt en hersteld eventuele andere verborgen .sh scripts in submappen
+        # Zoekt en herstelt eventuele andere verborgen .sh scripts in submappen
         find . -name "*.sh" -exec chmod +x {} +
         echo "Alle shell-script permissies zijn bijgewerkt!"
 
@@ -58,7 +58,17 @@ jobs:
     - name: Package into IPA
       run: |
         mkdir -p Payload
-        mv build/Release-iphoneos/Unity-iPhone.app Payload/
+        
+        # Zoekt automatisch waar Xcode de .app heeft neergezet en kopieert deze naar Payload
+        APP_PATH=$(find . -name "Unity-iPhone.app" -type d | head -n 1)
+        echo "Gevonden .app pad: $APP_PATH"
+        
+        if [ -z "$APP_PATH" ]; then
+          echo "Fout: Unity-iPhone.app kon niet worden gevonden op de server!"
+          exit 1
+        fi
+        
+        cp -R "$APP_PATH" Payload/
         zip -r CompiledApp.ipa Payload
 
     - name: Upload IPA Artifact
