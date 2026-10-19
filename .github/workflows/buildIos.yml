@@ -4,77 +4,166 @@ on:
   workflow_dispatch:
     inputs:
       base_name:
-        description: 'Typ de naam van het ZIP-bestand zonder de .001 (bijv: TreasureHunt.zip)'
+        description: 'ZIP filename without .001 (example: WorkshopWenskaart.zip)'
         required: true
-        default: 'TreasureHunt.zip'
+        default: 'WorkshopWenskaart.zip'
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: macos-14
-    
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
 
-    - name: Combine and Unzip Project Files
-      run: |
-        echo "Bezig met samenvoegen van de delen voor: ${{ github.event.inputs.base_name }}"
-        # Plakt .zip.001, .zip.002 etc. weer aan elkaar tot één werkende zip
-        cat "${{ github.event.inputs.base_name }}.00"* > combined_project.zip
-        
-        # Pakt de samengevoegde zip uit
-        unzip combined_project.zip
-        echo "Bestanden succesvol uitgepakt. Inhoud map:"
-        ls -la
+      - name: Combine and Unzip Project Files
+        shell: bash
+        env:
+          BASE_NAME: ${{ inputs.base_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          export LC_ALL=C
 
-    - name: Fix Script Permissions (Permission Denied Fix)
-      run: |
-        echo "Bezig met herstellen van rechten voor Unity shell-scripts..."
-        # Geeft execute-rechten aan het specifieke process_symbols script
-        if [ -f "process_symbols.sh" ]; then
-          chmod +x process_symbols.sh
-          echo "Rechten hersteld voor process_symbols.sh"
-        fi
-        
-        # Zoekt en herstelt eventuele andere verborgen .sh scripts in submappen
-        find . -name "*.sh" -exec chmod +x {} +
-        echo "Alle shell-script permissies zijn bijgewerkt!"
+          echo "Combining archive parts for: $BASE_NAME"
 
-    - name: Set up Xcode version
-      uses: maxim-lobanov/setup-xcode@v1
-      with:
-        xcode-version: '15.4'
+          parts=( "$BASE_NAME".[0-9][0-9][0-9] )
 
-    - name: Build Xcode Project
-      run: |
-        xcodebuild -project Unity-iPhone.xcodeproj \
-                   -scheme Unity-iPhone \
-                   -configuration Release \
-                   -sdk iphoneos \
-                   CONFIGURATION_BUILD_DIR=$GITHUB_WORKSPACE/build_output \
-                   CODE_SIGNING_ALLOWED=NO \
-                   CODE_SIGNING_REQUIRED=NO \
-                   clean build
+          if [ "${#parts[@]}" -eq 0 ]; then
+            echo "Error: no archive parts found for $BASE_NAME"
+            ls -lh
+            exit 1
+          fi
 
-    - name: Package into IPA
-      run: |
-        mkdir -p Payload
-        
-        # Zoekt dynamisch naar de map die eindigt op .app in de build-output map
-        REAL_APP_PATH=$(find $GITHUB_WORKSPACE/build_output -name "*.app" -type d | head -n 1)
-        echo "Echte app gevonden op pad: $REAL_APP_PATH"
-        
-        if [ -d "$REAL_APP_PATH" ]; then
-          cp -R "$REAL_APP_PATH" Payload/
-          zip -r CompiledApp.ipa Payload
-          echo "IPA succesvol ingepakt!"
-        else
-          echo "Fout: Er is geen .app map gevonden in de build_output map."
-          exit 1
-        fi
+          number=1
 
-    - name: Upload IPA Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ github.event.inputs.base_name }}-IPA
-        path: CompiledApp.ipa
+          for part in "${parts[@]}"; do
+            expected=$(printf '%s.%03d' "$BASE_NAME" "$number")
+
+            if [ "$part" != "$expected" ]; then
+              echo "Error: missing archive part: $expected"
+              exit 1
+            fi
+
+            if [ ! -s "$part" ]; then
+              echo "Error: archive part is empty: $part"
+              exit 1
+            fi
+
+            if head -c 200 "$part" | grep -q 'https://git-lfs.github.com/spec/v1'; then
+              echo "Error: $part is a Git LFS pointer instead of the actual file."
+              exit 1
+            fi
+
+            ls -lh "$part"
+            number=$((number + 1))
+          done
+
+          cat "${parts[@]}" > combined_project.zip
+
+          echo "Combined archive:"
+          ls -lh combined_project.zip
+          file combined_project.zip
+
+          echo "Checking ZIP integrity..."
+          unzip -tq combined_project.zip
+
+          mkdir -p extracted_project
+          unzip -q combined_project.zip -d extracted_project
+
+          echo "Project extracted successfully:"
+          ls -la extracted_project
+
+      - name: Fix Script Permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Restoring execution permissions for shell scripts..."
+          find extracted_project -type f -name "*.sh" -exec chmod +x {} +
+
+      - name: Set up Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+
+      - name: Find Xcode Project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_PATH=$(find "$GITHUB_WORKSPACE/extracted_project" \
+            -type d \
+            -name "Unity-iPhone.xcodeproj" \
+            -not -path "*/__MACOSX/*" \
+            -print -quit)
+
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "Error: Unity-iPhone.xcodeproj was not found."
+            echo "Upload a split ZIP of the exported Unity iOS Xcode project."
+            exit 1
+          fi
+
+          echo "Found Xcode project: $PROJECT_PATH"
+          echo "path=$PROJECT_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Build Xcode Project
+        shell: bash
+        env:
+          PROJECT_PATH: ${{ steps.project.outputs.path }}
+        run: |
+          set -euo pipefail
+
+          cd "$(dirname "$PROJECT_PATH")"
+
+          xcodebuild \
+            -project "$PROJECT_PATH" \
+            -scheme Unity-iPhone \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CONFIGURATION_BUILD_DIR="$GITHUB_WORKSPACE/build_output" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            clean build
+
+      - name: Package into IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REAL_APP_PATH=$(find "$GITHUB_WORKSPACE/build_output" \
+            -maxdepth 1 \
+            -type d \
+            -name "*.app" \
+            -print -quit)
+
+          if [ -z "$REAL_APP_PATH" ]; then
+            echo "Error: no .app found in build_output."
+            exit 1
+          fi
+
+          echo "Found app: $REAL_APP_PATH"
+
+          mkdir -p "$GITHUB_WORKSPACE/ipa_package/Payload"
+
+          ditto "$REAL_APP_PATH" \
+            "$GITHUB_WORKSPACE/ipa_package/Payload/$(basename "$REAL_APP_PATH")"
+
+          cd "$GITHUB_WORKSPACE/ipa_package"
+          zip -qry "$GITHUB_WORKSPACE/CompiledApp.ipa" Payload
+
+          echo "IPA packaged successfully."
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.base_name }}-IPA
+          path: CompiledApp.ipa
+          if-no-files-found: error
